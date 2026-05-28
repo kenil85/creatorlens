@@ -1,0 +1,15 @@
+@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html { font-family: 'DM Sans', system-ui, sans-serif; }
+  body { background: #FAFAF8; }
+
+  ::-webkit-scrollbar { width: 4px; height: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #C8C5BC; border-radius: 2px; }
+  ::-webkit-scrollbar-thumb:hover { background: #8C8A84; }
+}
