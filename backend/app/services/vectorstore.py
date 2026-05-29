@@ -1,44 +1,44 @@
 """
-Vector Embedding + Semantic Search Service
-───────────────────────────────────────────
-1. Chunks transcript segments into overlapping windows
-2. Embeds each chunk via OpenAI text-embedding-3-small
-3. Stores in Supabase pgvector
-4. Semantic search with cosine similarity
+Vector Embedding — sentence-transformers (FREE, local)
+───────────────────────────────────────────────────────
+Uses all-MiniLM-L6-v2 — runs locally, no API key, no cost.
+384-dim embeddings, great for semantic search.
 """
 
 import time
 import uuid
 import math
-import json
-from openai import AsyncOpenAI
+from sentence_transformers import SentenceTransformer
 from supabase import create_client, Client
 from app.core.config import get_settings
 from app.core.logging import logger
 from app.models.schemas import TranscriptSegment, VectorChunk, SearchResult
 
 settings = get_settings()
-client = AsyncOpenAI(api_key=settings.openai_api_key)
 
-EMBEDDING_MODEL = "text-embedding-3-small"
-EMBEDDING_DIMS = 1536
-COST_PER_TOKEN_EMBED = 0.00000002  # $0.02 per 1M tokens
+# Load once at startup — downloads ~90MB first time, cached after
+_model = None
 
-# ── Supabase client ────────────────────────────────────────────────────────────
+def get_model() -> SentenceTransformer:
+    global _model
+    if _model is None:
+        logger.info("embedding_model.loading", model="all-MiniLM-L6-v2")
+        _model = SentenceTransformer("all-MiniLM-L6-v2")
+        logger.info("embedding_model.ready")
+    return _model
+
+EMBEDDING_DIMS = 384  # all-MiniLM-L6-v2 output dims
+
+
 def get_supabase() -> Client:
     return create_client(settings.supabase_url, settings.supabase_service_key)
 
 
-# ── Chunking ───────────────────────────────────────────────────────────────────
 def chunk_segments(
     segments: list[TranscriptSegment],
     chunk_size: int = 3,
     overlap: int = 1,
 ) -> list[dict]:
-    """
-    Sliding window chunking over transcript segments.
-    chunk_size=3 means 3 segments per chunk, overlap=1 means 1 segment shared.
-    """
     chunks = []
     step = chunk_size - overlap
 
@@ -46,7 +46,6 @@ def chunk_segments(
         window = segments[i: i + chunk_size]
         if not window:
             break
-
         text = " ".join(seg.text for seg in window)
         chunks.append({
             "chunk_id": str(uuid.uuid4()),
@@ -54,66 +53,22 @@ def chunk_segments(
             "start": window[0].start,
             "end": window[-1].end,
             "speaker": window[0].speaker,
-            "segment_indices": list(range(i, min(i + chunk_size, len(segments)))),
         })
 
     return chunks
 
 
-# ── Embedding ──────────────────────────────────────────────────────────────────
-async def embed_texts(texts: list[str]) -> tuple[list[list[float]], int]:
-    """
-    Batch embed texts. Returns (embeddings, total_tokens).
-    OpenAI supports up to 2048 inputs per request.
-    """
+def embed_texts_local(texts: list[str]) -> list[list[float]]:
+    """Embed using local sentence-transformers. Free, no API call."""
     t0 = time.monotonic()
-    response = await client.embeddings.create(
-        model=EMBEDDING_MODEL,
-        input=texts,
-        encoding_format="float",
-    )
+    model = get_model()
+    embeddings = model.encode(texts, convert_to_numpy=True).tolist()
     latency = (time.monotonic() - t0) * 1000
-    tokens = response.usage.total_tokens
-
-    logger.info("embed.done",
-                count=len(texts),
-                tokens=tokens,
-                latency_ms=round(latency))
-
-    return [item.embedding for item in response.data], tokens
-
-
-# ── pgvector storage ───────────────────────────────────────────────────────────
-async def store_chunks(
-    job_id: str,
-    chunks: list[dict],
-    embeddings: list[list[float]],
-) -> None:
-    """Store chunks + embeddings in Supabase pgvector table."""
-    supabase = get_supabase()
-
-    rows = []
-    for chunk, emb in zip(chunks, embeddings):
-        rows.append({
-            "job_id": job_id,
-            "chunk_id": chunk["chunk_id"],
-            "text": chunk["text"],
-            "start_time": chunk["start"],
-            "end_time": chunk["end"],
-            "speaker": chunk["speaker"],
-            "embedding": emb,  # pgvector stores as array
-        })
-
-    # Upsert in batches of 50
-    batch_size = 50
-    for i in range(0, len(rows), batch_size):
-        batch = rows[i: i + batch_size]
-        supabase.table("video_chunks").upsert(batch).execute()
-        logger.info("pgvector.stored", batch=i // batch_size + 1, count=len(batch))
+    logger.info("embed.done", count=len(texts), latency_ms=round(latency), cost="$0.00")
+    return embeddings
 
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:
-    """Pure Python cosine similarity — no numpy needed."""
     dot = sum(x * y for x, y in zip(a, b))
     mag_a = math.sqrt(sum(x * x for x in a))
     mag_b = math.sqrt(sum(y * y for y in b))
@@ -122,70 +77,97 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (mag_a * mag_b)
 
 
-# ── Semantic search ────────────────────────────────────────────────────────────
+async def store_chunks(
+    job_id: str,
+    chunks: list[dict],
+    embeddings: list[list[float]],
+) -> None:
+    try:
+        supabase = get_supabase()
+        rows = []
+        for chunk, emb in zip(chunks, embeddings):
+            rows.append({
+                "job_id": job_id,
+                "chunk_id": chunk["chunk_id"],
+                "text": chunk["text"],
+                "start_time": chunk["start"],
+                "end_time": chunk["end"],
+                "speaker": chunk["speaker"],
+                "embedding": emb,
+            })
+
+        batch_size = 50
+        for i in range(0, len(rows), batch_size):
+            result = supabase.table("video_chunks").upsert(rows[i: i + batch_size]).execute()
+            logger.info("pgvector.stored", batch=i // batch_size + 1, count=len(rows[i: i + batch_size]))
+
+    except Exception as e:
+        import traceback
+        logger.error("pgvector.store_failed", error=str(e), traceback=traceback.format_exc())
+        raise
+
 async def semantic_search(
     job_id: str,
     query: str,
     top_k: int = 5,
 ) -> tuple[list[SearchResult], float, int]:
-    """
-    Embed query → cosine similarity search via pgvector.
-    Returns (results, latency_ms, tokens_used).
-    """
     t0 = time.monotonic()
 
-    # Embed query
-    query_embeddings, tokens = await embed_texts([query])
+    # Embed query locally
+    query_embeddings = embed_texts_local([query])
     query_vec = query_embeddings[0]
 
-    # pgvector cosine similarity search
+    # Fetch all chunks for this job and rank by cosine similarity
+    # (For production, use pgvector RPC — for free tier this is fine)
     supabase = get_supabase()
+    response = supabase.table("video_chunks").select(
+        "chunk_id, text, start_time, end_time, speaker, embedding"
+    ).eq("job_id", job_id).execute()
 
-    # Using pgvector's <=> operator via RPC
-    response = supabase.rpc("match_video_chunks", {
-        "query_embedding": query_vec,
-        "match_job_id": job_id,
-        "match_count": top_k,
-    }).execute()
+    rows = response.data or []
 
-    results = []
-    for row in (response.data or []):
-        results.append(SearchResult(
+    # Score each chunk
+    scored = []
+    for row in rows:
+        emb = row["embedding"]
+        if isinstance(emb, str):
+            import json
+            emb = json.loads(emb)
+        emb = [float(x) for x in emb]
+        score = cosine_similarity(query_vec, emb)
+        scored.append((score, row))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top = scored[:top_k]
+
+    results = [
+        SearchResult(
             chunk_id=row["chunk_id"],
             text=row["text"],
-            similarity_score=round(1 - row["distance"], 4),  # pgvector returns distance
+            similarity_score=round(score, 4),
             start=row["start_time"],
             end=row["end_time"],
             speaker=row.get("speaker", "SPK_0"),
-        ))
+        )
+        for score, row in top
+    ]
 
     latency = (time.monotonic() - t0) * 1000
-    logger.info("search.done",
-                query=query[:50],
-                results=len(results),
-                latency_ms=round(latency))
-
-    return results, round(latency, 2), tokens
+    logger.info("search.done", results=len(results), latency_ms=round(latency))
+    return results, round(latency, 2), 0
 
 
-# ── Full embedding pipeline ────────────────────────────────────────────────────
 async def embed_transcript(
     job_id: str,
     segments: list[TranscriptSegment],
 ) -> tuple[list[VectorChunk], int, float]:
-    """
-    Full pipeline: chunk → embed → store → return VectorChunk list.
-    Returns (chunks, total_tokens, cost_usd).
-    """
     raw_chunks = chunk_segments(segments)
     texts = [c["text"] for c in raw_chunks]
 
-    embeddings, total_tokens = await embed_texts(texts)
-    cost = total_tokens * COST_PER_TOKEN_EMBED
+    embeddings = embed_texts_local(texts)
 
     await store_chunks(job_id, raw_chunks, embeddings)
 
-    # Build VectorChunk objects (with embedding preview — first 8 dims only)
     vector_chunks = []
     for chunk, emb in zip(raw_chunks, embeddings):
         vector_chunks.append(VectorChunk(
@@ -197,9 +179,5 @@ async def embed_transcript(
             similarity_score=None,
         ))
 
-    logger.info("embed_transcript.done",
-                chunks=len(vector_chunks),
-                tokens=total_tokens,
-                cost_usd=round(cost, 6))
-
-    return vector_chunks, total_tokens, cost
+    logger.info("embed_transcript.done", chunks=len(vector_chunks), cost="$0.00")
+    return vector_chunks, len(texts) * 50, 0.0  # tokens approx, cost = 0

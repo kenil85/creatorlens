@@ -8,9 +8,8 @@ class Settings(BaseSettings):
     app_secret_key: str = "dev-secret-change-in-prod"
     cors_origins: str = "http://localhost:3000"
 
-    # AI
-    openai_api_key: str
-    anthropic_api_key: str = ""
+    # Groq (free)
+    groq_api_key: str
 
     # Supabase
     supabase_url: str
