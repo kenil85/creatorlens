@@ -38,7 +38,6 @@ async def download_audio(video_url: str, output_dir: str) -> tuple[str, dict]:
         "--no-playlist",
         "--write-info-json",
         "--ffmpeg-location", ffmpeg_path,
-        "--js-runtimes", r"node:C:\Program Files\nodejs\node.exe",
         "--remote-components", "ejs:github",
         "-o", output_path,
         video_url,
