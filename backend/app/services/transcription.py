@@ -8,6 +8,7 @@ Transcription Service — Groq Whisper (FREE)
 
 import asyncio
 import os
+import shutil
 import time
 import tempfile
 from pathlib import Path
@@ -26,8 +27,8 @@ async def download_audio(video_url: str, output_dir: str) -> tuple[str, dict]:
     import shutil
     output_path = os.path.join(output_dir, "audio.%(ext)s")
 
-    # Find ffmpeg path explicitly
-    ffmpeg_path = r"D:\Master\ffmpeg-master-latest-win64-gpl-shared\ffmpeg-master-latest-win64-gpl-shared\bin\ffmpeg.exe"
+    import shutil
+    ffmpeg_path = shutil.which("ffmpeg") or "ffmpeg"
 
     cmd = [
         "yt-dlp",
